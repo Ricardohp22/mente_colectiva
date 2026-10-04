@@ -113,4 +113,11 @@ describe("GameEngine", () => {
       points: 5,
     });
   });
+
+  it("no termina el LIVE mientras la pregunta sigue abierta", () => {
+    const { engine } = engineWith();
+    engine.openNextQuestion();
+
+    expect(() => engine.finishLive()).toThrow(/pregunta en curso/);
+  });
 });

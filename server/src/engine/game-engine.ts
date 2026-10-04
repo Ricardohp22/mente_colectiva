@@ -15,6 +15,7 @@ export interface CommentInput {
 }
 
 export interface StoredAnswer {
+  id: string;
   playerId: string;
   questionInstanceId: string;
   rawAnswer: string;
@@ -64,6 +65,29 @@ interface QuestionInstance {
   id: string;
   question: Question;
   openedAt: number;
+  closedAt: number | null;
+}
+
+const DEFAULT_LIVE_DURATION_SECONDS = 60 * 60;
+
+export interface EngineExport {
+  liveId: string | null;
+  state: GameState;
+  startedAt: number | null;
+  endedAt: number | null;
+  durationLimitSeconds: number;
+  players: Array<{ id: string; externalId: string; displayName: string }>;
+  instances: Array<{
+    id: string;
+    questionId: string;
+    openedAt: number;
+    closedAt: number | null;
+    value: number;
+    initialTimeSeconds: number;
+  }>;
+  answers: StoredAnswer[];
+  scores: Array<{ playerId: string; points: number }>;
+  events: GameEvent[];
 }
 
 export class GameEngine {
@@ -72,11 +96,15 @@ export class GameEngine {
   private readonly players = new Map<string, PlayerRecord>();
   private readonly scores = new Map<string, number>();
   private readonly answers: StoredAnswer[] = [];
+  private readonly instances: QuestionInstance[] = [];
   private readonly usedQuestionIds = new Set<string>();
   private readonly events = new EventQueue();
   private readonly timer = new TimerEngine();
   private instance: QuestionInstance | null = null;
   private lastResult: QuestionResult | null = null;
+  private startedAt: number | null = null;
+  private endedAt: number | null = null;
+  private durationLimitSeconds = DEFAULT_LIVE_DURATION_SECONDS;
   private sequence = 0;
 
   constructor(
@@ -84,12 +112,14 @@ export class GameEngine {
     private readonly questions: readonly Question[],
   ) {}
 
-  startLive(liveId = "live-1"): void {
+  startLive(liveId = "live-1", options?: { durationLimitSeconds?: number }): void {
     if (this.liveId) {
       throw new Error("Ya hay un LIVE en curso");
     }
 
     this.liveId = liveId;
+    this.startedAt = this.clock.now();
+    this.durationLimitSeconds = options?.durationLimitSeconds ?? DEFAULT_LIVE_DURATION_SECONDS;
     this.state = "IDLE";
     this.record("LIVE_STARTED", { status: "applied" });
   }
@@ -124,7 +154,9 @@ export class GameEngine {
       id: `${question.id}-A`,
       question,
       openedAt: now,
+      closedAt: null,
     };
+    this.instances.push(this.instance);
     this.usedQuestionIds.add(question.id);
     this.timer.start(question.initialTimeSeconds * 1000, now);
     this.state = "QUESTION_ACTIVE";
@@ -178,6 +210,7 @@ export class GameEngine {
     }
 
     this.answers.push({
+      id: this.nextId("answer"),
       playerId: player.id,
       questionInstanceId: instance.id,
       rawAnswer,
@@ -209,6 +242,48 @@ export class GameEngine {
     }
 
     this.closeQuestion();
+  }
+
+  finishLive(): void {
+    this.sync();
+
+    if (!this.liveId) {
+      throw new Error("El LIVE no ha empezado");
+    }
+
+    if (this.state === "QUESTION_ACTIVE") {
+      throw new Error("Hay una pregunta en curso");
+    }
+
+    if (this.state === "LIVE_FINISHED") {
+      return;
+    }
+
+    this.endedAt = this.clock.now();
+    this.state = "LIVE_FINISHED";
+    this.record("LIVE_FINISHED", { status: "applied" });
+  }
+
+  exportState(): EngineExport {
+    return {
+      liveId: this.liveId,
+      state: this.state,
+      startedAt: this.startedAt,
+      endedAt: this.endedAt,
+      durationLimitSeconds: this.durationLimitSeconds,
+      players: [...this.players.values()],
+      instances: this.instances.map((instance) => ({
+        id: instance.id,
+        questionId: instance.question.id,
+        openedAt: instance.openedAt,
+        closedAt: instance.closedAt,
+        value: instance.question.value,
+        initialTimeSeconds: instance.question.initialTimeSeconds,
+      })),
+      answers: this.answers,
+      scores: [...this.scores.entries()].map(([playerId, points]) => ({ playerId, points })),
+      events: [...this.events.history()],
+    };
   }
 
   listAnswers(): readonly StoredAnswer[] {
@@ -251,6 +326,7 @@ export class GameEngine {
     }
 
     const instance = this.instance;
+    instance.closedAt = this.clock.now();
     this.record("TIMER_EXPIRED", {
       questionInstanceId: instance.id,
       status: "applied",
